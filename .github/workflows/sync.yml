@@ -1,0 +1,91 @@
+name: Mirror Sync
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          pip install gdown
+
+      - name: Download Google Drive folder
+        run: |
+          rm -rf drive_sync
+          gdown --folder "${{ secrets.GDRIVE_URL }}" -O drive_sync
+
+      - name: Install AWS CLI
+        run: |
+          curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+          unzip awscliv2.zip
+          sudo ./aws/install
+
+      - name: Configure R2 credentials
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        run: |
+          aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+          aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
+          aws configure set default.region us-east-1
+
+      - name: Sync files to Cloudflare R2
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: |
+          aws s3 sync drive_sync "s3://$R2_BUCKET" \
+            --endpoint-url "$R2_ENDPOINT" \
+            --size-only \
+            --delete
+
+      - name: Generate filelist.json
+        env:
+          BASE_URL: ${{ secrets.R2_PUBLIC_BASE_URL }}
+        run: |
+          mkdir -p pages
+          echo '{' > pages/filelist.json
+          echo '  "generated": "'$(date -u +"%Y-%m-%dT%H:%M:%SZ")'",' >> pages/filelist.json
+          echo '  "base_url": "'"$BASE_URL"'",' >> pages/filelist.json
+          echo '  "files": [' >> pages/filelist.json
+
+          first=true
+          find drive_sync -type f | while read file; do
+            rel="${file#drive_sync/}"
+            size=$(stat -c%s "$file")
+            hash=$(sha256sum "$file" | awk '{print $1}')
+            mod=$(date -u -r "$file" +"%Y-%m-%dT%H:%M:%SZ")
+
+            if [ "$first" = true ]; then
+              first=false
+            else
+              echo ',' >> pages/filelist.json
+            fi
+
+            jq -n \
+              --arg path "$rel" \
+              --arg sha256 "$hash" \
+              --arg modified "$mod" \
+              --argjson size "$size" \
+              '{path:$path,size:$size,sha256:$sha256,modified:$modified}' \
+              >> pages/filelist.json
+          done
+
+          echo '' >> pages/filelist.json
+          echo '  ]' >> pages/filelist.json
+          echo '}' >> pages/filelist.json
+
+      - name: Commit and push metadata
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add pages/filelist.json
+          git diff --quiet && git diff --staged --quiet || \
+            git commit -m "Mirror update"
+          git push
