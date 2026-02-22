@@ -1,2 +1,22 @@
 [tools]
 python = "3.12"
+go = "1.23"
+node = "24"
+upx = "latest"
+
+[tools."go:github.com/wailsapp/wails/v2/cmd/wails"]
+version = "latest"
+
+[tasks.debug]
+dir = "aa2hardlinker"
+run = "wails dev"
+
+[tasks."build:windows"]
+dir = "aa2hardlinker"
+env = { GOOS = "windows" }
+run = "wails build -webview2 \"embed\" -upx"
+
+[tasks."build:linux"]
+dir = "aa2hardlinker"
+env = { GOOS = "linux" }
+run = "wails build -tags webkit2_41 -upx"

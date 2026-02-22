@@ -1,0 +1,19 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "aa2hardlinker",
+  "outputfilename": "aa2hardlinker",
+  "frontend:install": "npm install",
+  "frontend:build": "npm run build",
+  "frontend:dev:watcher": "npm run dev",
+  "frontend:dev:serverUrl": "auto",
+  "author": {
+    "name": "R00taryEnginE",
+    "email": "13239555+R00taryEnginE@users.noreply.github.com"
+  },
+  "Info": {
+    "companyName": "AA2D",
+    "productName": "AA2 Hardlinker Updater",
+    "productVersion": "0.1.0",
+    "copyright": "None"
+  }
+}

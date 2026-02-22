@@ -1,0 +1,6 @@
+build/bin
+node_modules
+frontend/dist
+aa2hardlinker.log
+AA2Play.exe
+/data

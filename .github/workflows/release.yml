@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+env:
+  # Necessary for most environments as build failure can occur due to OOM issues
+  NODE_OPTIONS: "--max-old-space-size=4096"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      - uses: jdx/mise-action@v3
+      - name: Install dependencies
+        run: |
+          sudo apt-get -yq update
+          sudo apt-get -yq install libgtk-3-0 libwebkit2gtk-4.1-dev gcc-aarch64-linux-gnu
+      - name: Build binaries
+        working-directory: ./aa2hardlinker
+        run: |
+          wails build -platform "windows/amd64" -webview2 "embed" -upx -o "AA2Hardlinker.exe"
+          wails build -platform "linux/amd64" -tags webkit2_41 -upx -o "AA2Hardlinker"
+      - name: Zip binaries
+        run: |
+          zip -j "AA2Hardlinker-windows-amd64.zip" "./aa2hardlinker/build/bin/AA2Hardlinker.exe"
+          zip -j "AA2Hardlinker-linux-amd64.zip" "./aa2hardlinker/build/bin/AA2Hardlinker"
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        if: github.ref_type == 'tag'
+        with:
+          generate_release_notes: true
+          make_latest: true
+          files: |
+            AA2Hardlinker-windows-amd64.zip
+            AA2Hardlinker-linux-amd64.zip
+          

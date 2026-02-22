@@ -1,9 +1,11 @@
 import argparse
 import datetime
+import io
 import json
 import os
 import threading
 import time
+import re
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -26,7 +28,6 @@ PLAN_FILENAME = ".sync_plan.json"
 DEFAULT_DOWNLOAD_RETRIES = 3
 DEFAULT_TIMEOUT = 60
 
-
 @dataclass
 class SyncConfig:
     folder_id: str
@@ -40,6 +41,8 @@ class SyncConfig:
     r2_bucket: str
     r2_endpoint: str
     filelist_key: str
+    mapping_file_id: str
+    mapping_object_key: str
 
 
 def require_env(name: str) -> str:
@@ -66,6 +69,8 @@ def load_config() -> SyncConfig:
         r2_bucket=require_env("R2_BUCKET"),
         r2_endpoint=require_env("R2_ENDPOINT"),
         filelist_key=os.environ.get("R2_FILELIST_KEY", "filelist.json"),
+        mapping_file_id=require_env("DRIVE_BASH_SCRIPT_ID"),
+        mapping_object_key=os.environ.get("R2_MAPPING_KEY", "pathmap.json"),
     )
 
     config.workdir.mkdir(parents=True, exist_ok=True)
@@ -365,6 +370,78 @@ def upload_filelist_to_r2(client: BaseClient, cfg: SyncConfig, payload: Dict[str
     )
 
 
+def download_drive_file_bytes(cfg: SyncConfig, creds: Credentials, file_id: str) -> bytes:
+    url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
+    force_refresh = False
+
+    for attempt in range(cfg.download_retries):
+        token = get_access_token(creds, force_refresh=force_refresh)
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            with requests.get(
+                url,
+                headers=headers,
+                stream=True,
+                timeout=cfg.request_timeout,
+            ) as response:
+                if response.status_code == 401:
+                    force_refresh = True
+                    raise requests.HTTPError(response=response)
+                response.raise_for_status()
+                buffer = io.BytesIO()
+                for chunk in response.iter_content(chunk_size=cfg.chunk_size):
+                    if chunk:
+                        buffer.write(chunk)
+                return buffer.getvalue()
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response else "?"
+            print(
+                f"Mapping download HTTP error (status {status}) - "
+                f"attempt {attempt + 1}/{cfg.download_retries}"
+            )
+        except requests.RequestException as exc:
+            force_refresh = False
+            print(
+                f"Mapping download error: {exc} - "
+                f"attempt {attempt + 1}/{cfg.download_retries}"
+            )
+
+        if attempt < cfg.download_retries - 1:
+            time.sleep(2 ** attempt)
+
+    raise RuntimeError("Failed to download mapping source after retries")
+
+
+def build_mapping_document(source_bytes: bytes):
+    pattern = r'^ln\s+-s\s+\"(.*)\"\s+(.*)'
+    mapping = []
+    # Write byes to file
+    temp_path = Path("mapping_source.tmp")
+    temp_path.write_bytes(source_bytes)
+    
+    with temp_path.open("r", encoding="utf-8") as f:
+        lines = f.readlines()
+    
+    for line in lines:
+        match = re.match(pattern, line.strip())
+        if match:
+            source, target = match.groups()
+            mapping.append({"source": source, "target": target})
+
+    temp_path.unlink()
+    return mapping
+
+
+def upload_mapping_to_r2(client: BaseClient, cfg: SyncConfig, mapping_path: Path) -> None:
+    client.put_object(
+        Bucket=cfg.r2_bucket,
+        Key=cfg.mapping_object_key,
+        Body=mapping_path.read_bytes(),
+        ACL="public-read",
+        ContentType="application/json",
+    )
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Sync Google Drive PNGs into R2 storage and publish filelist metadata",
@@ -403,6 +480,13 @@ def main(force_plan: bool = False) -> None:
     final_inventory = list_r2_pngs(s3_client, cfg.r2_bucket)
     payload = write_filelist(cfg, final_inventory)
     upload_filelist_to_r2(s3_client, cfg, payload)
+
+    print(f"Generating {cfg.mapping_object_key} from harderlinker script source file...")
+    mapping_bytes = download_drive_file_bytes(cfg, creds, cfg.mapping_file_id)
+    mapping_payload = build_mapping_document(mapping_bytes)
+    mapping_path = cfg.workdir / cfg.mapping_object_key
+    mapping_path.write_text(json.dumps(mapping_payload, indent=2))
+    upload_mapping_to_r2(s3_client, cfg, mapping_path)
 
     print("Drive → R2 sync complete.")
 
