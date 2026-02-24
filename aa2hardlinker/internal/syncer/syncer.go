@@ -112,6 +112,34 @@ func lockFor(path string) *sync.Mutex {
 	return actual.(*sync.Mutex)
 }
 
+func (r *workflowRunner) emitProgress(evt ProgressEvent) {
+	r.progCh <- evt
+}
+
+func (r *workflowRunner) logDebug(format string, args ...interface{}) {
+	if r.logger != nil {
+		r.logger.Debugf(format, args...)
+	}
+}
+
+func (r *workflowRunner) logInfo(format string, args ...interface{}) {
+	if r.logger != nil {
+		r.logger.Infof(format, args...)
+	}
+}
+
+func (r *workflowRunner) logWarn(format string, args ...interface{}) {
+	if r.logger != nil {
+		r.logger.Warnf(format, args...)
+	}
+}
+
+func (r *workflowRunner) logError(format string, args ...interface{}) {
+	if r.logger != nil {
+		r.logger.Errorf(format, args...)
+	}
+}
+
 // StartWorkflow runs the full update flow and emits step/progress events.
 // The provided context controls cancellation; requestTimeout applies per network request.
 func StartWorkflow(ctx context.Context, dest, manifestURL, baseURL, pathmapURL string, requestTimeout time.Duration) (<-chan StepEvent, <-chan ProgressEvent, <-chan DoneEvent) {
@@ -386,21 +414,6 @@ func (r *workflowRunner) applyPathmap(ctx context.Context) error {
 
 	dataDir := filepath.Dir(r.dest)
 
-	dirs, err := os.ReadDir(dataDir)
-	if err != nil {
-		return fmt.Errorf("read data dir: %w", err)
-	}
-	for _, d := range dirs {
-		if d.Type()&os.ModeSymlink == 0 {
-			continue
-		}
-		linkPath := filepath.Join(dataDir, d.Name())
-		if err := os.Remove(linkPath); err != nil {
-			r.logWarn("remove old symlink %s: %v", linkPath, err)
-			return fmt.Errorf("remove symlink %s: %w", linkPath, err)
-		}
-	}
-
 	for i, e := range entries {
 		select {
 		case <-ctx.Done():
@@ -411,7 +424,7 @@ func (r *workflowRunner) applyPathmap(ctx context.Context) error {
 		src := filepath.FromSlash(e.Source)
 		dst := filepath.Join(dataDir, filepath.FromSlash(e.Target))
 
-		if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+		if err := os.RemoveAll(dst); err != nil && !os.IsNotExist(err) {
 			r.logWarn("remove old link %s: %v", dst, err)
 			return fmt.Errorf("remove old link %s: %w", dst, err)
 		}
@@ -430,34 +443,6 @@ func (r *workflowRunner) applyPathmap(ctx context.Context) error {
 	}
 
 	return nil
-}
-
-func (r *workflowRunner) emitProgress(evt ProgressEvent) {
-	r.progCh <- evt
-}
-
-func (r *workflowRunner) logDebug(format string, args ...interface{}) {
-	if r.logger != nil {
-		r.logger.Debugf(format, args...)
-	}
-}
-
-func (r *workflowRunner) logInfo(format string, args ...interface{}) {
-	if r.logger != nil {
-		r.logger.Infof(format, args...)
-	}
-}
-
-func (r *workflowRunner) logWarn(format string, args ...interface{}) {
-	if r.logger != nil {
-		r.logger.Warnf(format, args...)
-	}
-}
-
-func (r *workflowRunner) logError(format string, args ...interface{}) {
-	if r.logger != nil {
-		r.logger.Errorf(format, args...)
-	}
 }
 
 func fetchFileList(ctx context.Context, manifestURL string, requestTimeout time.Duration) (FileList, error) {

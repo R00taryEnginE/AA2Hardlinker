@@ -7,7 +7,7 @@ import (
 
 const (
 	AppName     = "AA2 Hardlinker Updater"
-	AppVersion  = "0.1.0"
+	AppVersion  = "0.1.1"
 	ManifestURL = "https://cdn-hardlinker.aa2d.net/filelist.json"
 	PathmapURL  = "https://cdn-hardlinker.aa2d.net/pathmap.json"
 )
