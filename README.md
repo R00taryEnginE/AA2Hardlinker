@@ -27,3 +27,8 @@ sudo dnf install webkit2gtk4.1
 # For Arch-based distributions
 sudo pacman -S webkit2gtk-4.1
 ```
+
+### Credits
+A huge thanks to the following people, without whom this project would not be possible:
+- @clickonflareblitz - For maintaining the original hardlinker.
+- @egarim and @ce00fded - For beta testing and providing feedback.
