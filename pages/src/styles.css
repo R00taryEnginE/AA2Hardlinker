@@ -166,6 +166,7 @@ ol {
 }
 
 .small {
+  display: block;
   margin-top: 0.8rem;
   color: var(--muted);
   font-size: 0.95rem;
