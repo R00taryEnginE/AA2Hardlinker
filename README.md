@@ -27,8 +27,22 @@ sudo dnf install webkit2gtk4.1
 # For Arch-based distributions
 sudo pacman -S webkit2gtk-4.1
 ```
+### Why does the program ask for admin privileges on Windows?
+This is a limitation of how the privileges for symlinks work on Windows. The program requires administrator privileges or developer mode to be turned on to be able to manage symlinks.
+This StackOverflow answer explains it in more detail: https://stackoverflow.com/a/64992080/13570473
 
-### Credits
+## In the weeds
+So how does all of this work in detail? Until now, the "hardlinker" mod was just a large archive of textures along with a `.bat` or `.sh` script that would create symlinks
+to trick the game into seeing the textures.
+
+The entire process was manual, prone to errors, and required the user to download the entire archive every time there was an update. This is no longer the case with this program.
+Here is how it works now:
+1. [This script](./scripts/sync_drive.py) runs nightly via github actions and mirrors the contents of the Google Drive to a public Cloudflare R2 bucket, generating a manifest file and a symlink path mapping file using the existing `.sh` script as reference in the process.
+2. The program uses the manifest file to check for updates and only downloads the files that have changed since the last update, saving bandwidth and time.
+3. The program performs integrity checks on the downloaded files to ensure they are not corrupted and that they match the expected hash values.
+4. The program creates the necessary symlinks to the downloaded files in the game directory, allowing the game to access the new textures.
+
+## Credits
 A huge thanks to the following people, without whom this project would not be possible:
 - @clickonflareblitz - For maintaining the original hardlinker.
 - @egarim and @ce00fded - For beta testing and providing feedback.
