@@ -3,7 +3,6 @@ import datetime
 import io
 import json
 import os
-import threading
 import time
 import re
 from collections import deque
@@ -16,10 +15,8 @@ import boto3
 from botocore.client import BaseClient
 import requests
 from tqdm import tqdm
-from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from google.auth.transport.requests import Request
 
 PNG_MIME = "image/png"
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -38,6 +35,7 @@ class SyncConfig:
     chunk_size: int
     download_retries: int
     request_timeout: int
+    drive_api_key: str
     r2_bucket: str
     r2_endpoint: str
     filelist_key: str
@@ -57,6 +55,10 @@ def load_config() -> SyncConfig:
     plan_override = os.environ.get("SYNC_PLAN_FILE")
     plan_path = Path(plan_override) if plan_override else workdir / PLAN_FILENAME
 
+    drive_api_key = os.environ.get("DRIVE_API_KEY")
+    if not drive_api_key:
+        raise RuntimeError("Missing required environment variable: DRIVE_API_KEY")
+
     config = SyncConfig(
         folder_id=require_env("DRIVE_FOLDER_ID"),
         base_url=os.environ.get("R2_PUBLIC_BASE_URL"),
@@ -66,6 +68,7 @@ def load_config() -> SyncConfig:
         chunk_size=int(os.environ.get("DOWNLOAD_CHUNK_SIZE", str(8 * 1024 * 1024))),
         download_retries=int(os.environ.get("DOWNLOAD_RETRIES", str(DEFAULT_DOWNLOAD_RETRIES))),
         request_timeout=int(os.environ.get("DOWNLOAD_TIMEOUT", str(DEFAULT_TIMEOUT))),
+        drive_api_key=drive_api_key,
         r2_bucket=require_env("R2_BUCKET"),
         r2_endpoint=require_env("R2_ENDPOINT"),
         filelist_key=os.environ.get("R2_FILELIST_KEY", "filelist.json"),
@@ -78,25 +81,11 @@ def load_config() -> SyncConfig:
     return config
 
 
-def build_credentials() -> Credentials:
-    creds = Credentials(
-        None,
-        refresh_token=require_env("GOOGLE_REFRESH_TOKEN"),
-        token_uri="https://oauth2.googleapis.com/token",
-        client_id=require_env("GOOGLE_CLIENT_ID"),
-        client_secret=require_env("GOOGLE_CLIENT_SECRET"),
-        scopes=["https://www.googleapis.com/auth/drive.readonly"],
-    )
-    if not creds.valid:
-        creds.refresh(Request())
-    return creds
-
-
-def build_drive_service(creds: Credentials) -> Any:
+def build_drive_service(api_key: str) -> Any:
     return build(
         "drive",
         "v3",
-        credentials=creds,
+        developerKey=api_key,
         cache_discovery=False,
         static_discovery=False,
     )
@@ -177,26 +166,14 @@ def discover_png_files(drive: Any, root_folder_id: str) -> Dict[str, dict]:
     return discovered
 
 
-token_lock = threading.Lock()
-
-
-def get_access_token(creds: Credentials, force_refresh: bool = False) -> str:
-    with token_lock:
-        if force_refresh or not creds.valid or creds.expired:
-            creds.refresh(Request())
-        return creds.token
-
-
-def stream_download(file_meta: dict, cfg: SyncConfig, creds: Credentials) -> None:
+def stream_download(file_meta: dict, cfg: SyncConfig) -> None:
     path = cfg.workdir / file_meta["path"]
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(path.suffix + ".tmp")
-    url = f"https://www.googleapis.com/drive/v3/files/{file_meta['id']}?alt=media"
-    force_refresh = False
+    url = f"https://www.googleapis.com/drive/v3/files/{file_meta['id']}?alt=media&key={cfg.drive_api_key}"
 
     for attempt in range(cfg.download_retries):
-        token = get_access_token(creds, force_refresh=force_refresh)
-        headers = {"Authorization": f"Bearer {token}"}
+        headers: Dict[str, str] = {}
         try:
             with requests.get(
                 url,
@@ -213,13 +190,11 @@ def stream_download(file_meta: dict, cfg: SyncConfig, creds: Credentials) -> Non
             return
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response else "?"
-            force_refresh = status == 401
             print(
                 f"Download HTTP error for {file_meta['path']} (status {status}) - "
                 f"attempt {attempt + 1}/{cfg.download_retries}"
             )
         except (requests.RequestException, OSError) as exc:
-            force_refresh = False
             print(
                 f"Download error for {file_meta['path']}: {exc} - "
                 f"attempt {attempt + 1}/{cfg.download_retries}"
@@ -238,7 +213,7 @@ def stream_download(file_meta: dict, cfg: SyncConfig, creds: Credentials) -> Non
     raise RuntimeError(f"Failed to download {file_meta['path']} after {cfg.download_retries} attempts")
 
 
-def download_changed_files(changed: Sequence[dict], cfg: SyncConfig, creds: Credentials) -> None:
+def download_changed_files(changed: Sequence[dict], cfg: SyncConfig) -> None:
     if not changed:
         print("No Drive downloads required.")
         return
@@ -246,7 +221,7 @@ def download_changed_files(changed: Sequence[dict], cfg: SyncConfig, creds: Cred
     print(f"Downloading {len(changed)} PNG files with {cfg.max_workers} workers...")
     errors: List[str] = []
     with ThreadPoolExecutor(max_workers=cfg.max_workers) as executor:
-        futures = {executor.submit(stream_download, meta, cfg, creds): meta for meta in changed}
+        futures = {executor.submit(stream_download, meta, cfg): meta for meta in changed}
         for future in tqdm(
             as_completed(futures),
             total=len(futures),
@@ -370,13 +345,11 @@ def upload_filelist_to_r2(client: BaseClient, cfg: SyncConfig, payload: Dict[str
     )
 
 
-def download_drive_file_bytes(cfg: SyncConfig, creds: Credentials, file_id: str) -> bytes:
-    url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-    force_refresh = False
+def download_drive_file_bytes(cfg: SyncConfig, file_id: str) -> bytes:
+    url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&key={cfg.drive_api_key}"
 
     for attempt in range(cfg.download_retries):
-        token = get_access_token(creds, force_refresh=force_refresh)
-        headers = {"Authorization": f"Bearer {token}"}
+        headers: Dict[str, str] = {}
         try:
             with requests.get(
                 url,
@@ -400,7 +373,6 @@ def download_drive_file_bytes(cfg: SyncConfig, creds: Credentials, file_id: str)
                 f"attempt {attempt + 1}/{cfg.download_retries}"
             )
         except requests.RequestException as exc:
-            force_refresh = False
             print(
                 f"Mapping download error: {exc} - "
                 f"attempt {attempt + 1}/{cfg.download_retries}"
@@ -456,8 +428,7 @@ def parse_args() -> argparse.Namespace:
 
 def main(force_plan: bool = False) -> None:
     cfg = load_config()
-    creds = build_credentials()
-    drive = build_drive_service(creds)
+    drive = build_drive_service(cfg.drive_api_key)
     s3_client = build_s3_client(cfg)
 
     drive_files = discover_png_files(drive, cfg.folder_id)
@@ -473,7 +444,7 @@ def main(force_plan: bool = False) -> None:
     )
     write_sync_plan(cfg.plan_file, uploads, deletes)
 
-    download_changed_files(uploads, cfg, creds)
+    download_changed_files(uploads, cfg)
     upload_files(s3_client, cfg, uploads)
     delete_files(s3_client, cfg, deletes)
 
@@ -482,7 +453,7 @@ def main(force_plan: bool = False) -> None:
     upload_filelist_to_r2(s3_client, cfg, payload)
 
     print(f"Generating {cfg.mapping_object_key} from harderlinker script source file...")
-    mapping_bytes = download_drive_file_bytes(cfg, creds, cfg.mapping_file_id)
+    mapping_bytes = download_drive_file_bytes(cfg, cfg.mapping_file_id)
     mapping_payload = build_mapping_document(mapping_bytes)
     mapping_path = cfg.workdir / cfg.mapping_object_key
     mapping_path.write_text(json.dumps(mapping_payload, indent=2))
